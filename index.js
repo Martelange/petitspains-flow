@@ -53,11 +53,17 @@ app.post('/whatsapp-flow', async (req, res) => {
     let responseData;
 
     // Chargement initial des produits
-    if (decrypted.action === 'INIT' || decrypted.screen === 'SCREEN_PRODUITS') {
+    if (decrypted.action === 'INIT' || decrypted.action === 'BACK' || decrypted.screen === 'SCREEN_PRODUITS') {
       const produits = await getOdooProducts();
       responseData = {
         screen: 'SCREEN_PRODUITS',
-        data: { produits }
+        data: { 
+          produits: produits.map(p => ({
+            id: p.id,
+            title: p.title.substring(0, 30),
+            description: p.description
+          }))
+        }
       };
     }
     // Soumission du formulaire
