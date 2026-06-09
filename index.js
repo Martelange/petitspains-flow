@@ -10,7 +10,8 @@ const ODOO_URL = process.env.ODOO_URL;
 const ODOO_DB = process.env.ODOO_DB;
 const ODOO_UID = parseInt(process.env.ODOO_UID);
 const ODOO_KEY = process.env.ODOO_API_KEY;
-const N8N_WEBHOOK = process.env.N8N_WEBHOOK_URL;
+const WA_TOKEN = process.env.WA_ACCESS_TOKEN;
+const WA_PHONE_ID = process.env.WA_PHONE_NUMBER_ID || '1107381829131462';
 
 function decrypt(body) {
   const { encrypted_aes_key, encrypted_flow_data, initial_vector } = body;
@@ -31,14 +32,9 @@ function decrypt(body) {
 
 function encrypt(data, aesKey, iv) {
   const flippedIv = Buffer.alloc(iv.length);
-  for (let i = 0; i < iv.length; i++) {
-    flippedIv[i] = ~iv[i];
-  }
+  for (let i = 0; i < iv.length; i++) flippedIv[i] = ~iv[i];
   const cipher = crypto.createCipheriv('aes-128-gcm', aesKey, flippedIv);
-  const encrypted = Buffer.concat([
-    cipher.update(JSON.stringify(data), 'utf-8'),
-    cipher.final()
-  ]);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(data), 'utf-8'), cipher.final()]);
   return Buffer.concat([encrypted, cipher.getAuthTag()]).toString('base64');
 }
 
@@ -56,13 +52,80 @@ async function getOdooProducts() {
       return p ? { id: p[1], title: p[2].substring(0, 30), description: `${parseFloat(p[3]).toFixed(2)} € / unité` } : null;
     }).filter(Boolean);
   } catch (e) {
-    console.error('Odoo error:', e.message);
+    console.error('Odoo products error:', e.message);
     return [
       { id: '1', title: 'Baguette tradition', description: '1.20 € / unité' },
       { id: '2', title: 'Pain complet', description: '2.50 € / unité' }
     ];
   }
 }
+
+async function getOdooPartner(phone) {
+  try {
+    const phoneClean = phone.replace('+', '');
+    const res = await axios.post(
+      `${ODOO_URL}/xmlrpc/2/object`,
+      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>res.partner</value></param><param><value>search_read</value></param><param><value><array><data><array><data><value><array><data><value>phone</value><value>like</value><value>${phoneClean}</value></data></array></value></data></array></value></param><param><value><struct><member><name>fields</name><value><array><data><value>id</value><value>name</value></data></array></value></member><member><name>limit</name><value><int>1</int></value></member></struct></value></param></params></methodCall>`,
+      { headers: { 'Content-Type': 'text/xml' } }
+    );
+    const idMatch = res.data.match(/<name>id<\/name>\s*<value><int>(\d+)<\/int>/);
+    return idMatch ? parseInt(idMatch[1]) : 1;
+  } catch (e) {
+    return 1;
+  }
+}
+
+async function createOdooSO(partnerId, lignes, dateLivraison, phone, commentaire) {
+  const orderLinesXml = lignes.map(item =>
+    `<value><array><data><value><int>0</int></value><value><int>0</int></value><value><struct><member><name>product_id</name><value><int>${item.produit_id}</int></value></member><member><name>product_uom_qty</name><value><double>${item.qte}</double></value></member><member><name>price_unit</name><value><double>${item.prix}</double></value></member><member><name>name</name><value><string>${item.nom}</string></value></member></struct></value></data></array></value>`
+  ).join('');
+
+  const note = `WhatsApp Flow - ${phone} - Livraison: ${dateLivraison}${commentaire ? ' - ' + commentaire : ''}`;
+
+  const res = await axios.post(
+    `${ODOO_URL}/xmlrpc/2/object`,
+    `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>sale.order</value></param><param><value>create</value></param><param><value><array><data><value><struct><member><name>partner_id</name><value><int>${partnerId}</int></value></member><member><name>order_line</name><value><array><data>${orderLinesXml}</data></array></value></member><member><name>note</name><value><string>${note}</string></value></member><member><name>origin</name><value><string>WhatsApp Flow</string></value></member></struct></value></data></array></value></param><param><value><struct/></value></param></params></methodCall>`,
+    { headers: { 'Content-Type': 'text/xml' } }
+  );
+  const idMatch = res.data.match(/<value><int>(\d+)<\/int><\/value>/);
+  return idMatch ? idMatch[1] : null;
+}
+
+async function sendWhatsAppMessage(to, message, buttons) {
+  if (!WA_TOKEN) { console.log('No WA_TOKEN set'); return; }
+  let body;
+  if (buttons && buttons.length > 0) {
+    body = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: message },
+        action: {
+          buttons: buttons.map(b => ({ type: 'reply', reply: { id: b.id, title: b.title.substring(0, 20) } }))
+        }
+      }
+    };
+  } else {
+    body = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'text',
+      text: { body: message, preview_url: false }
+    };
+  }
+  await axios.post(
+    `https://graph.facebook.com/v19.0/${WA_PHONE_ID}/messages`,
+    body,
+    { headers: { 'Authorization': `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } }
+  );
+}
+
+// Stockage temporaire des commandes en attente de confirmation (en mémoire)
+const pendingOrders = {};
 
 app.post('/whatsapp-flow', async (req, res) => {
   try {
@@ -71,53 +134,93 @@ app.post('/whatsapp-flow', async (req, res) => {
 
     let responseData;
 
+    // Health check ping
     if (decrypted.action === 'ping') {
       responseData = { data: { status: 'active' } };
     }
+    // Chargement initial
     else if (decrypted.action === 'INIT' || decrypted.action === 'BACK') {
       const produits = await getOdooProducts();
-      responseData = {
-        screen: 'SCREEN_PRODUITS',
-        data: { produits }
-      };
+      responseData = { screen: 'SCREEN_PRODUITS', data: { produits } };
     }
-    else if (decrypted.action === 'data_exchange') {
+    // Soumission du formulaire produits → afficher le récap
+    else if (decrypted.action === 'data_exchange' && decrypted.screen === 'SCREEN_PRODUITS') {
       const payload = decrypted.data;
+      const phone = decrypted.flow_token;
+      const produits = await getOdooProducts();
 
-      if (N8N_WEBHOOK) {
-        axios.post(N8N_WEBHOOK, {
-          phone: decrypted.flow_token,
-          produit_id: payload.produit_id,
-          quantite: payload.quantite,
-          date_livraison: payload.date_livraison,
-          commentaire: payload.commentaire
-        }).catch(e => console.error('n8n error:', e.message));
+      // Construire les lignes de commande
+      const lignes = [];
+      for (let i = 1; i <= 3; i++) {
+        const id = payload[`produit_${i}_id`];
+        const qte = parseInt(payload[`produit_${i}_qte`]);
+        if (id && qte > 0) {
+          const prod = produits.find(p => p.id === id);
+          if (prod) {
+            const prix = parseFloat(prod.description.replace(' € / unité', '')) || 0;
+            lignes.push({ produit_id: id, nom: prod.title, qte, prix });
+          }
+        }
       }
 
-      const dateLabel = payload.date_livraison === 'demain'
-        ? 'demain matin'
-        : payload.date_livraison === 'apres_demain'
-          ? 'apres-demain matin'
-          : payload.commentaire || 'date a confirmer';
+      if (lignes.length === 0) {
+        responseData = {
+          screen: 'SCREEN_PRODUITS',
+          data: { produits, error_message: 'Veuillez sélectionner au moins un produit avec une quantité.' }
+        };
+      } else {
+        // Formater la date
+        const dateRaw = payload.date_livraison;
+        let dateLabel = dateRaw || 'non précisée';
+        if (dateRaw && dateRaw.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          const d = new Date(dateRaw);
+          dateLabel = d.toLocaleDateString('fr-BE', { weekday: 'long', day: 'numeric', month: 'long' });
+        }
+
+        // Stocker la commande en attente
+        pendingOrders[phone] = { lignes, dateLivraison: dateLabel, commentaire: payload.commentaire || '' };
+
+        // Construire le récap
+        const recapLines = lignes.map(l => `• ${l.nom} × ${l.qte} = ${(l.prix * l.qte).toFixed(2)} €`).join('\n');
+        const total = lignes.reduce((s, l) => s + l.prix * l.qte, 0);
+        const recap = `${recapLines}\n\nTotal estimé : ${total.toFixed(2)} €\nLivraison : ${dateLabel}${payload.commentaire ? '\nCommentaire : ' + payload.commentaire : ''}`;
+
+        responseData = {
+          screen: 'SCREEN_CONFIRMATION',
+          data: { recap }
+        };
+      }
+    }
+    // Confirmation finale → créer le SO dans Odoo
+    else if (decrypted.action === 'data_exchange' && decrypted.screen === 'SCREEN_CONFIRMATION') {
+      const phone = decrypted.flow_token;
+      const pending = pendingOrders[phone];
+
+      if (pending) {
+        const partnerId = await getOdooPartner(phone);
+        const soId = await createOdooSO(partnerId, pending.lignes, pending.dateLivraison, phone, pending.commentaire);
+        delete pendingOrders[phone];
+
+        const soRef = soId ? `#SO${soId}` : '';
+        const recapLines = pending.lignes.map(l => `• ${l.nom} × ${l.qte}`).join('\n');
+        const confirmMsg = `Commande ${soRef} enregistrée !\n\n${recapLines}\n\nLivraison : ${pending.dateLivraison}\n\nMerci et à bientôt !`;
+
+        // Envoyer message de confirmation WA
+        setTimeout(() => sendWhatsAppMessage(phone, confirmMsg, null).catch(e => console.error('WA confirm error:', e.message)), 1000);
+      }
 
       responseData = {
         screen: 'SUCCESS',
         data: {
           extension_message_response: {
-            params: {
-              flow_token: decrypted.flow_token,
-              recap: `Commande recue ! Livraison : ${dateLabel}`
-            }
+            params: { flow_token: decrypted.flow_token }
           }
         }
       };
     }
     else {
       const produits = await getOdooProducts();
-      responseData = {
-        screen: 'SCREEN_PRODUITS',
-        data: { produits }
-      };
+      responseData = { screen: 'SCREEN_PRODUITS', data: { produits } };
     }
 
     const encrypted = encrypt(responseData, aesKey, iv);
@@ -125,7 +228,7 @@ app.post('/whatsapp-flow', async (req, res) => {
     res.send(encrypted);
 
   } catch (err) {
-    console.error('Error:', err.message);
+    console.error('Error:', err.message, err.stack);
     res.status(421).send('Decryption failed');
   }
 });
