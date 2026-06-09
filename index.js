@@ -81,7 +81,8 @@ app.post('/whatsapp-flow', async (req, res) => {
     }
 
     const encrypted = encrypt(responseData, aesKey, iv);
-    res.json({ encrypted_flow_response: encrypted });
+    res.setHeader('Content-Type', 'text/plain');
+    res.send(encrypted);
 
   } catch (err) {
     console.error('Error:', err.message);
