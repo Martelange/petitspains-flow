@@ -12,6 +12,17 @@ const ODOO_UID = parseInt(process.env.ODOO_UID);
 const ODOO_KEY = process.env.ODOO_API_KEY;
 const N8N_WEBHOOK = process.env.N8N_WEBHOOK_URL;
 
+app.post('/whatsapp-flow', async (req, res) => {
+  try {
+    const { decryptedData, aesKey, iv } = decrypt(req.body);
+    
+    // Gérer le ping de santé
+    if (decryptedData.action === 'ping') {
+      const response = encrypt({ data: { status: 'active' } }, aesKey, iv);
+      res.setHeader('Content-Type', 'text/plain');
+      return res.send(response);
+    }
+
 function decrypt(body) {
   const { encrypted_aes_key, encrypted_flow_data, initial_vector } = body;
   const aesKey = crypto.privateDecrypt(
