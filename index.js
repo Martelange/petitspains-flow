@@ -25,9 +25,10 @@ async function dbQuery(sql, params = []) {
 
 async function savePendingOrder(phone, data) {
   await dbQuery(
-    `CREATE TABLE IF NOT EXISTS pending_flow_orders (phone VARCHAR(20) PRIMARY KEY, data TEXT, created_at TIMESTAMP DEFAULT NOW());
-     INSERT INTO pending_flow_orders (phone, data) VALUES ($1, $2)
-     ON CONFLICT (phone) DO UPDATE SET data = $2, created_at = NOW()`,
+    `CREATE TABLE IF NOT EXISTS pending_flow_orders (phone VARCHAR(20) PRIMARY KEY, data TEXT, created_at TIMESTAMP DEFAULT NOW())`
+  );
+  await dbQuery(
+    `INSERT INTO pending_flow_orders (phone, data) VALUES ($1, $2) ON CONFLICT (phone) DO UPDATE SET data = $2, created_at = NOW()`,
     [phone, JSON.stringify(data)]
   );
 }
