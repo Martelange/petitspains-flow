@@ -75,8 +75,10 @@ async function getOdooPrices() {
       const p = m.match(/<int>(\d+)<\/int>.*?<string>([^<]+)<\/string>.*?<double>([^<]+)<\/double>/s);
       if (p) prices[p[1]] = { nom: p[2], prix: parseFloat(p[3]) };
     });
+    console.log('Prices keys:', Object.keys(prices));
     return prices;
   } catch (e) {
+    console.error('getOdooPrices error:', e.message);
     return {};
   }
 }
@@ -86,32 +88,31 @@ async function findOrCreatePartner(phone, name) {
     const phoneClean = phone.replace('+', '').replace(/\s/g, '');
     console.log('Searching partner with phone:', phoneClean);
     
-
-    // 1. Chercher par téléphone mobile
     const searchRes = await axios.post(
       `${ODOO_URL}/xmlrpc/2/object`,
-      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>res.partner</value></param><param><value>search_read</value></param><param><value><array><data><array><data><value><array><data><value>|</value></data></array></value><value><array><data><value>mobile</value><value>like</value><value>${phoneClean}</value></data></array></value><value><array><data><value>phone</value><value>like</value><value>${phoneClean}</value></data></array></value></data></array></data></array></value></param><param><value><struct><member><name>fields</name><value><array><data><value>id</value><value>name</value></data></array></value></member><member><name>limit</name><value><int>1</int></value></member></struct></value></param></params></methodCall>`,
+      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>res.partner</value></param><param><value>search_read</value></param><param><value><array><data><array><data><value><array><data><value>mobile</value><value>like</value><value>${phoneClean}</value></data></array></value></data></array></data></array></value></param><param><value><struct><member><name>fields</name><value><array><data><value>id</value><value>name</value></data></array></value></member><member><name>limit</name><value><int>1</int></value></member></struct></value></param></params></methodCall>`,
       { headers: { 'Content-Type': 'text/xml' } }
     );
-    console.log('Partner search response:', searchRes.data.substring(0, 500));
-
+    console.log('Partner search result:', searchRes.data.substring(0, 300));
+    
     const idMatch = searchRes.data.match(/<name>id<\/name>\s*<value><int>(\d+)<\/int>/);
     if (idMatch) {
-      console.log(`Partner found: ID ${idMatch[1]}`);
+      console.log('Partner found: ID', idMatch[1]);
       return parseInt(idMatch[1]);
     }
 
-    // 2. Créer un nouveau partenaire
-    console.log(`Creating new partner: ${name} (${phone})`);
+    // Créer nouveau partenaire
+    console.log('Creating new partner:', name, phone);
     const createRes = await axios.post(
       `${ODOO_URL}/xmlrpc/2/object`,
-      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>res.partner</value></param><param><value>create</value></param><param><value><array><data><value><struct><member><name>name</name><value><string>${name}</string></value></member><member><name>mobile</name><value><string>+${phoneClean}</string></value></member><member><name>comment</name><value><string>Client créé automatiquement via WhatsApp Bot</string></value></member></struct></value></data></array></value></param><param><value><struct/></value></param></params></methodCall>`,
+      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>res.partner</value></param><param><value>create</value></param><param><value><array><data><value><struct><member><name>name</name><value><string>${name}</string></value></member><member><name>mobile</name><value><string>+${phoneClean}</string></value></member></struct></value></data></array></value></param><param><value><struct/></value></param></params></methodCall>`,
       { headers: { 'Content-Type': 'text/xml' } }
     );
-
+    console.log('Partner create result:', createRes.data.substring(0, 300));
+    
     const newIdMatch = createRes.data.match(/<value><int>(\d+)<\/int><\/value>/);
     const newId = newIdMatch ? parseInt(newIdMatch[1]) : 1;
-    console.log(`New partner created: ID ${newId}`);
+    console.log('New partner created: ID', newId);
     return newId;
 
   } catch (e) {
@@ -260,6 +261,7 @@ else if (decrypted.action === 'data_exchange') {
     else {
       const produits = await getOdooProducts();
       const prices = await getOdooPrices();
+      console.log('Looking for IDs:', payload.produit_1_id, payload.produit_2_id);
       const lignes = [];
       for (let i = 1; i <= 3; i++) {
         const id = payload[`produit_${i}_id`];
