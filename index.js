@@ -49,11 +49,35 @@ async function getOdooProducts() {
     const matches = xml.match(/<member>\s*<name>id<\/name>\s*<value><int>(\d+)<\/int><\/value>\s*<\/member>\s*<member>\s*<name>name<\/name>\s*<value><string>([^<]+)<\/string><\/value>\s*<\/member>\s*<member>\s*<name>list_price<\/name>\s*<value><double>([^<]+)<\/double><\/value>/g) || [];
     return matches.map(m => {
       const p = m.match(/<int>(\d+)<\/int>.*?<string>([^<]+)<\/string>.*?<double>([^<]+)<\/double>/s);
-      return p ? { id: p[1], title: p[2].substring(0, 30), description: `${parseFloat(p[3]).toFixed(2)} € / unité`, price: parseFloat(p[3]) } : null;
+      return p ? { 
+        id: p[1], 
+        title: p[2].substring(0, 30), 
+        description: `${parseFloat(p[3]).toFixed(2)} € / unité`
+      } : null;
     }).filter(Boolean);
   } catch (e) {
     console.error('Odoo products error:', e.message);
-    return [{ id: '1', title: 'Baguette tradition', description: '1.20 € / unité', price: 1.20 }];
+    return [{ id: '1', title: 'Baguette tradition', description: '1.20 € / unité'}];
+  }
+}
+
+async function getOdooPrices() {
+  try {
+    const res = await axios.post(
+      `${ODOO_URL}/xmlrpc/2/object`,
+      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>product.template</value></param><param><value>search_read</value></param><param><value><array><data><array><data></data></array></data></array></value></param><param><value><struct><member><name>fields</name><value><array><data><value>id</value><value>name</value><value>list_price</value></data></array></value></member><member><name>limit</name><value><int>20</int></value></member></struct></value></param></params></methodCall>`,
+      { headers: { 'Content-Type': 'text/xml' } }
+    );
+    const xml = res.data;
+    const matches = xml.match(/<member>\s*<name>id<\/name>\s*<value><int>(\d+)<\/int><\/value>\s*<\/member>\s*<member>\s*<name>name<\/name>\s*<value><string>([^<]+)<\/string><\/value>\s*<\/member>\s*<member>\s*<name>list_price<\/name>\s*<value><double>([^<]+)<\/double><\/value>/g) || [];
+    const prices = {};
+    matches.forEach(m => {
+      const p = m.match(/<int>(\d+)<\/int>.*?<string>([^<]+)<\/string>.*?<double>([^<]+)<\/double>/s);
+      if (p) prices[p[1]] = { nom: p[2], prix: parseFloat(p[3]) };
+    });
+    return prices;
+  } catch (e) {
+    return {};
   }
 }
 
@@ -232,13 +256,14 @@ else if (decrypted.action === 'data_exchange') {
     // Soumission des produits → afficher récap
     else {
       const produits = await getOdooProducts();
+      const prices = await getOdooPrices();
       const lignes = [];
       for (let i = 1; i <= 3; i++) {
         const id = payload[`produit_${i}_id`];
         const qte = parseInt(payload[`produit_${i}_qte`]);
         if (id && qte > 0) {
-          const prod = produits.find(p => p.id === id);
-          if (prod) lignes.push({ produit_id: id, nom: prod.title, qte, prix: prod.price });
+          const info = prices[id];
+          if (info) lignes.push({ produit_id: id, nom: info.nom, qte, prix: info.prix });
         }
       }
       if (lignes.length === 0) {
