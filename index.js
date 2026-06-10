@@ -38,93 +38,116 @@ function encrypt(data, aesKey, iv) {
   return Buffer.concat([encrypted, cipher.getAuthTag()]).toString('base64');
 }
 
+function odooXmlRpc(model, method, args, kwargs = {}) {
+  const kwargsXml = Object.keys(kwargs).length === 0 ? '<struct/>' :
+    '<struct>' + Object.entries(kwargs).map(([k, v]) =>
+      `<member><name>${k}</name><value><string>${v}</string></value></member>`
+    ).join('') + '</struct>';
+
+  return axios.post(
+    `${ODOO_URL}/xmlrpc/2/object`,
+    `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>${model}</value></param><param><value>${method}</value></param><param><value><array><data>${args}</data></array></value></param><param><value>${kwargsXml}</value></param></params></methodCall>`,
+    { headers: { 'Content-Type': 'text/xml' } }
+  );
+}
+
 async function getOdooProducts() {
   try {
-    const res = await axios.post(
-      `${ODOO_URL}/xmlrpc/2/object`,
-      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>product.template</value></param><param><value>search_read</value></param><param><value><array><data><array><data></data></array></data></array></value></param><param><value><struct><member><name>fields</name><value><array><data><value>id</value><value>name</value><value>list_price</value></data></array></value></member><member><name>limit</name><value><int>20</int></value></member></struct></value></param></params></methodCall>`,
-      { headers: { 'Content-Type': 'text/xml' } }
+    const res = await odooXmlRpc(
+      'product.template', 'search_read',
+      '<array><data></data></array>',
+      { fields: 'id,name,list_price', limit: '20' }
     );
     const xml = res.data;
     const matches = xml.match(/<member>\s*<name>id<\/name>\s*<value><int>(\d+)<\/int><\/value>\s*<\/member>\s*<member>\s*<name>name<\/name>\s*<value><string>([^<]+)<\/string><\/value>\s*<\/member>\s*<member>\s*<name>list_price<\/name>\s*<value><double>([^<]+)<\/double><\/value>/g) || [];
     return matches.map(m => {
       const p = m.match(/<int>(\d+)<\/int>.*?<string>([^<]+)<\/string>.*?<double>([^<]+)<\/double>/s);
-      return p ? { id: p[1], title: p[2].substring(0, 30), description: `${parseFloat(p[3]).toFixed(2)} € / unité` } : null;
+      return p ? { id: p[1], title: p[2].substring(0, 30), description: `${parseFloat(p[3]).toFixed(2)} € / unité`, price: parseFloat(p[3]) } : null;
     }).filter(Boolean);
   } catch (e) {
     console.error('Odoo products error:', e.message);
-    return [
-      { id: '1', title: 'Baguette tradition', description: '1.20 € / unité' },
-      { id: '2', title: 'Pain complet', description: '2.50 € / unité' }
-    ];
+    return [{ id: '1', title: 'Baguette tradition', description: '1.20 € / unité', price: 1.20 }];
   }
 }
 
-async function getOdooPartner(phone) {
+async function findOrCreatePartner(phone, name) {
   try {
-    const phoneClean = phone.replace('+', '');
-    const res = await axios.post(
+    const phoneClean = phone.replace('+', '').replace(/\s/g, '');
+
+    // 1. Chercher par téléphone mobile
+    const searchRes = await axios.post(
       `${ODOO_URL}/xmlrpc/2/object`,
-      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>res.partner</value></param><param><value>search_read</value></param><param><value><array><data><array><data><value><array><data><value>phone</value><value>like</value><value>${phoneClean}</value></data></array></value></data></array></value></param><param><value><struct><member><name>fields</name><value><array><data><value>id</value><value>name</value></data></array></value></member><member><name>limit</name><value><int>1</int></value></member></struct></value></param></params></methodCall>`,
+      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>res.partner</value></param><param><value>search_read</value></param><param><value><array><data><array><data><value><array><data><value>|</value></data></array></value><value><array><data><value>mobile</value><value>like</value><value>${phoneClean}</value></data></array></value><value><array><data><value>phone</value><value>like</value><value>${phoneClean}</value></data></array></value></data></array></data></array></value></param><param><value><struct><member><name>fields</name><value><array><data><value>id</value><value>name</value></data></array></value></member><member><name>limit</name><value><int>1</int></value></member></struct></value></param></params></methodCall>`,
       { headers: { 'Content-Type': 'text/xml' } }
     );
-    const idMatch = res.data.match(/<name>id<\/name>\s*<value><int>(\d+)<\/int>/);
-    return idMatch ? parseInt(idMatch[1]) : 1;
+
+    const idMatch = searchRes.data.match(/<name>id<\/name>\s*<value><int>(\d+)<\/int>/);
+    if (idMatch) {
+      console.log(`Partner found: ID ${idMatch[1]}`);
+      return parseInt(idMatch[1]);
+    }
+
+    // 2. Créer un nouveau partenaire
+    console.log(`Creating new partner: ${name} (${phone})`);
+    const createRes = await axios.post(
+      `${ODOO_URL}/xmlrpc/2/object`,
+      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>res.partner</value></param><param><value>create</value></param><param><value><array><data><value><struct><member><name>name</name><value><string>${name}</string></value></member><member><name>mobile</name><value><string>+${phoneClean}</string></value></member><member><name>comment</name><value><string>Client créé automatiquement via WhatsApp Bot</string></value></member></struct></value></data></array></value></param><param><value><struct/></value></param></params></methodCall>`,
+      { headers: { 'Content-Type': 'text/xml' } }
+    );
+
+    const newIdMatch = createRes.data.match(/<value><int>(\d+)<\/int><\/value>/);
+    const newId = newIdMatch ? parseInt(newIdMatch[1]) : 1;
+    console.log(`New partner created: ID ${newId}`);
+    return newId;
+
   } catch (e) {
+    console.error('Partner error:', e.message);
     return 1;
   }
 }
 
-async function createOdooSO(partnerId, lignes, dateLivraison, phone, commentaire) {
-  const orderLinesXml = lignes.map(item =>
-    `<value><array><data><value><int>0</int></value><value><int>0</int></value><value><struct><member><name>product_id</name><value><int>${item.produit_id}</int></value></member><member><name>product_uom_qty</name><value><double>${item.qte}</double></value></member><member><name>price_unit</name><value><double>${item.prix}</double></value></member><member><name>name</name><value><string>${item.nom}</string></value></member></struct></value></data></array></value>`
-  ).join('');
+async function createOdooSO(partnerId, lignes, dateLivraison, dateRaw, phone, commentaire) {
+  try {
+    const orderLinesXml = lignes.map(item =>
+      `<value><array><data><value><int>0</int></value><value><int>0</int></value><value><struct><member><name>product_id</name><value><int>${item.produit_id}</int></value></member><member><name>product_uom_qty</name><value><double>${item.qte}</double></value></member><member><name>price_unit</name><value><double>${item.prix}</double></value></member><member><name>name</name><value><string>${item.nom}</string></value></member></struct></value></data></array></value>`
+    ).join('');
 
-  const note = `WhatsApp Flow - ${phone} - Livraison: ${dateLivraison}${commentaire ? ' - ' + commentaire : ''}`;
+    const note = `WhatsApp Flow - ${phone}${commentaire ? ' - ' + commentaire : ''}`;
 
-  const res = await axios.post(
-    `${ODOO_URL}/xmlrpc/2/object`,
-    `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>sale.order</value></param><param><value>create</value></param><param><value><array><data><value><struct><member><name>partner_id</name><value><int>${partnerId}</int></value></member><member><name>order_line</name><value><array><data>${orderLinesXml}</data></array></value></member><member><name>note</name><value><string>${note}</string></value></member><member><name>origin</name><value><string>WhatsApp Flow</string></value></member></struct></value></data></array></value></param><param><value><struct/></value></param></params></methodCall>`,
-    { headers: { 'Content-Type': 'text/xml' } }
-  );
-  const idMatch = res.data.match(/<value><int>(\d+)<\/int><\/value>/);
-  return idMatch ? idMatch[1] : null;
+    // Construire la date ISO pour commitment_date (format Odoo: YYYY-MM-DD HH:MM:SS)
+    let commitmentDate = '';
+    if (dateRaw && dateRaw.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      commitmentDate = `${dateRaw} 08:00:00`;
+    }
+
+    const commitmentDateXml = commitmentDate
+      ? `<member><name>commitment_date</name><value><string>${commitmentDate}</string></value></member>`
+      : '';
+
+    const res = await axios.post(
+      `${ODOO_URL}/xmlrpc/2/object`,
+      `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>sale.order</value></param><param><value>create</value></param><param><value><array><data><value><struct><member><name>partner_id</name><value><int>${partnerId}</int></value></member>${commitmentDateXml}<member><name>order_line</name><value><array><data>${orderLinesXml}</data></array></value></member><member><name>note</name><value><string>${note}</string></value></member><member><name>origin</name><value><string>WhatsApp Flow</string></value></member></struct></value></data></array></value></param><param><value><struct/></value></param></params></methodCall>`,
+      { headers: { 'Content-Type': 'text/xml' } }
+    );
+
+    const idMatch = res.data.match(/<value><int>(\d+)<\/int><\/value>/);
+    return idMatch ? idMatch[1] : null;
+  } catch (e) {
+    console.error('SO creation error:', e.message);
+    return null;
+  }
 }
 
-async function sendWhatsAppMessage(to, message, buttons) {
+async function sendWhatsAppMessage(to, message) {
   if (!WA_TOKEN) { console.log('No WA_TOKEN set'); return; }
-  let body;
-  if (buttons && buttons.length > 0) {
-    body = {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to,
-      type: 'interactive',
-      interactive: {
-        type: 'button',
-        body: { text: message },
-        action: {
-          buttons: buttons.map(b => ({ type: 'reply', reply: { id: b.id, title: b.title.substring(0, 20) } }))
-        }
-      }
-    };
-  } else {
-    body = {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to,
-      type: 'text',
-      text: { body: message, preview_url: false }
-    };
-  }
   await axios.post(
     `https://graph.facebook.com/v19.0/${WA_PHONE_ID}/messages`,
-    body,
+    { messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'text', text: { body: message, preview_url: false } },
     { headers: { 'Authorization': `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } }
   );
 }
 
-// Stockage temporaire des commandes en attente de confirmation (en mémoire)
+// Stockage temporaire des commandes en attente
 const pendingOrders = {};
 
 app.post('/whatsapp-flow', async (req, res) => {
@@ -143,13 +166,13 @@ app.post('/whatsapp-flow', async (req, res) => {
       const produits = await getOdooProducts();
       responseData = { screen: 'SCREEN_PRODUITS', data: { produits } };
     }
-    // Soumission du formulaire produits → afficher le récap
+    // Soumission formulaire produits → afficher récap
     else if (decrypted.action === 'data_exchange' && decrypted.screen === 'SCREEN_PRODUITS') {
       const payload = decrypted.data;
       const phone = decrypted.flow_token;
       const produits = await getOdooProducts();
 
-      // Construire les lignes de commande
+      // Construire les lignes
       const lignes = [];
       for (let i = 1; i <= 3; i++) {
         const id = payload[`produit_${i}_id`];
@@ -157,65 +180,72 @@ app.post('/whatsapp-flow', async (req, res) => {
         if (id && qte > 0) {
           const prod = produits.find(p => p.id === id);
           if (prod) {
-            const prix = parseFloat(prod.description.replace(' € / unité', '')) || 0;
-            lignes.push({ produit_id: id, nom: prod.title, qte, prix });
+            lignes.push({ produit_id: id, nom: prod.title, qte, prix: prod.price });
           }
         }
       }
 
       if (lignes.length === 0) {
+        const produits2 = await getOdooProducts();
         responseData = {
           screen: 'SCREEN_PRODUITS',
-          data: { produits, error_message: 'Veuillez sélectionner au moins un produit avec une quantité.' }
+          data: { produits: produits2, error_message: 'Veuillez sélectionner au moins un produit.' }
         };
       } else {
         // Formater la date
         const dateRaw = payload.date_livraison;
         let dateLabel = dateRaw || 'non précisée';
         if (dateRaw && dateRaw.match(/^\d{4}-\d{2}-\d{2}$/)) {
-          const d = new Date(dateRaw);
-          dateLabel = d.toLocaleDateString('fr-BE', { weekday: 'long', day: 'numeric', month: 'long' });
+          const d = new Date(dateRaw + 'T12:00:00');
+          dateLabel = d.toLocaleDateString('fr-BE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
         }
 
-        // Stocker la commande en attente
-        pendingOrders[phone] = { lignes, dateLivraison: dateLabel, commentaire: payload.commentaire || '' };
+        // Stocker en attente
+        pendingOrders[phone] = { lignes, dateLivraison: dateLabel, dateRaw, commentaire: payload.commentaire || '' };
 
         // Construire le récap
         const recapLines = lignes.map(l => `• ${l.nom} × ${l.qte} = ${(l.prix * l.qte).toFixed(2)} €`).join('\n');
         const total = lignes.reduce((s, l) => s + l.prix * l.qte, 0);
         const recap = `${recapLines}\n\nTotal estimé : ${total.toFixed(2)} €\nLivraison : ${dateLabel}${payload.commentaire ? '\nCommentaire : ' + payload.commentaire : ''}`;
 
-        responseData = {
-          screen: 'SCREEN_CONFIRMATION',
-          data: { recap }
-        };
+        responseData = { screen: 'SCREEN_CONFIRMATION', data: { recap } };
       }
     }
-    // Confirmation finale → créer le SO dans Odoo
+    // Confirmation finale → créer SO dans Odoo
     else if (decrypted.action === 'data_exchange' && decrypted.screen === 'SCREEN_CONFIRMATION') {
       const phone = decrypted.flow_token;
       const pending = pendingOrders[phone];
 
       if (pending) {
-        const partnerId = await getOdooPartner(phone);
-        const soId = await createOdooSO(partnerId, pending.lignes, pending.dateLivraison, phone, pending.commentaire);
+        // Trouver ou créer le partenaire
+        const waName = decrypted.data?.wa_name || 'Client WhatsApp';
+        const partnerId = await findOrCreatePartner(phone, waName);
+
+        // Créer le SO avec la date de livraison
+        const soId = await createOdooSO(
+          partnerId,
+          pending.lignes,
+          pending.dateLivraison,
+          pending.dateRaw,
+          phone,
+          pending.commentaire
+        );
+
         delete pendingOrders[phone];
 
         const soRef = soId ? `#SO${soId}` : '';
         const recapLines = pending.lignes.map(l => `• ${l.nom} × ${l.qte}`).join('\n');
-        const confirmMsg = `Commande ${soRef} enregistrée !\n\n${recapLines}\n\nLivraison : ${pending.dateLivraison}\n\nMerci et à bientôt !`;
+        const confirmMsg = `Commande ${soRef} enregistrée !\n\n${recapLines}\n\nLivraison : ${pending.dateLivraison}\n\nMerci et à bientôt ! 🍞`;
 
-        // Envoyer message de confirmation WA
-        setTimeout(() => sendWhatsAppMessage(phone, confirmMsg, null).catch(e => console.error('WA confirm error:', e.message)), 1000);
+        // Envoyer confirmation WA
+        setTimeout(() => {
+          sendWhatsAppMessage(phone, confirmMsg).catch(e => console.error('WA confirm error:', e.message));
+        }, 1500);
       }
 
       responseData = {
         screen: 'SUCCESS',
-        data: {
-          extension_message_response: {
-            params: { flow_token: decrypted.flow_token }
-          }
-        }
+        data: { extension_message_response: { params: { flow_token: decrypted.flow_token } } }
       };
     }
     else {
