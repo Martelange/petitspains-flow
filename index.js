@@ -139,6 +139,7 @@ const pendingOrders = {};
 
 app.post('/whatsapp-flow', async (req, res) => {
   try {
+    console.log('Full decrypted:', JSON.stringify(decrypted));
     const { decrypted, aesKey, iv } = decrypt(req.body);
     console.log('Action:', decrypted.action, '| Screen:', decrypted.screen);
 
