@@ -85,8 +85,7 @@ async function findOrCreatePartner(phone, name) {
   try {
     const phoneClean = phone.replace('+', '').replace(/\s/g, '');
     console.log('Searching partner with phone:', phoneClean);
-    const searchRes = await axios.post(...);
-    console.log('Partner search response:', searchRes.data.substring(0, 500));
+    
 
     // 1. Chercher par téléphone mobile
     const searchRes = await axios.post(
@@ -94,6 +93,7 @@ async function findOrCreatePartner(phone, name) {
       `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>res.partner</value></param><param><value>search_read</value></param><param><value><array><data><array><data><value><array><data><value>|</value></data></array></value><value><array><data><value>mobile</value><value>like</value><value>${phoneClean}</value></data></array></value><value><array><data><value>phone</value><value>like</value><value>${phoneClean}</value></data></array></value></data></array></data></array></value></param><param><value><struct><member><name>fields</name><value><array><data><value>id</value><value>name</value></data></array></value></member><member><name>limit</name><value><int>1</int></value></member></struct></value></param></params></methodCall>`,
       { headers: { 'Content-Type': 'text/xml' } }
     );
+    console.log('Partner search response:', searchRes.data.substring(0, 500));
 
     const idMatch = searchRes.data.match(/<name>id<\/name>\s*<value><int>(\d+)<\/int>/);
     if (idMatch) {
