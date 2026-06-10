@@ -154,7 +154,7 @@ app.post('/whatsapp-flow', async (req, res) => {
       responseData = { screen: 'SCREEN_PRODUITS', data: { produits } };
     }
     // Soumission formulaire produits → afficher récap
-    else if (decrypted.action === 'data_exchange' && decrypted.screen === 'SCREEN_PRODUITS') {
+    else if (decrypted.action === 'data_exchange' && (decrypted.screen === 'SCREEN_PRODUITS' || !decrypted.screen)) {
       const payload = decrypted.data;
       const phone = decrypted.flow_token;
       const produits = await getOdooProducts();
@@ -198,47 +198,72 @@ app.post('/whatsapp-flow', async (req, res) => {
         responseData = { screen: 'SCREEN_CONFIRMATION', data: { recap } };
       }
     }
-    // Confirmation finale → créer SO dans Odoo
-    else if (decrypted.action === 'data_exchange' && decrypted.screen === 'SCREEN_CONFIRMATION') {
-      const phone = decrypted.flow_token;
+    // Soumission formulaire produits → afficher récap
+else if (decrypted.action === 'data_exchange') {
+  const payload = decrypted.data || {};
+  const phone = decrypted.flow_token;
+
+  // Confirmation finale si on a une commande en attente et pas de produits soumis
+  if (pendingOrders[phone] && !payload.produit_1_id) {
       const pending = pendingOrders[phone];
-
-      if (pending) {
-        // Trouver ou créer le partenaire
-        const waName = decrypted.data?.wa_name || 'Client WhatsApp';
-        const partnerId = await findOrCreatePartner(phone, waName);
-
-        // Créer le SO avec la date de livraison
-        const soId = await createOdooSO(
-          partnerId,
-          pending.lignes,
-          pending.dateLivraison,
-          pending.dateRaw,
-          phone,
-          pending.commentaire
-        );
-
-        delete pendingOrders[phone];
-
-        const soRef = soId ? `#SO${soId}` : '';
-        const recapLines = pending.lignes.map(l => `• ${l.nom} × ${l.qte}`).join('\n');
-        const confirmMsg = `Commande ${soRef} enregistrée !\n\n${recapLines}\n\nLivraison : ${pending.dateLivraison}\n\nMerci et à bientôt ! 🍞`;
-
-        // Envoyer confirmation WA
-        setTimeout(() => {
-          sendWhatsAppMessage(phone, confirmMsg).catch(e => console.error('WA confirm error:', e.message));
-        }, 1500);
-      }
-
+      const waName = 'Client WhatsApp';
+      const partnerId = await findOrCreatePartner(phone, waName);
+      const soId = await createOdooSO(
+        partnerId,
+        pending.lignes,
+        pending.dateLivraison,
+        pending.dateRaw,
+        phone,
+        pending.commentaire
+      );
+      delete pendingOrders[phone];
+      const soRef = soId ? `#SO${soId}` : '';
+      const recapLines = pending.lignes.map(l => `• ${l.nom} × ${l.qte}`).join('\n');
+      const confirmMsg = `Commande ${soRef} enregistrée !\n\n${recapLines}\n\nLivraison : ${pending.dateLivraison}\n\nMerci et à bientôt ! 🍞`;
+      setTimeout(() => {
+        sendWhatsAppMessage(phone, confirmMsg).catch(e => console.error('WA confirm error:', e.message));
+      }, 1500);
       responseData = {
         screen: 'SUCCESS',
-        data: { extension_message_response: { params: { flow_token: decrypted.flow_token } } }
+        data: { extension_message_response: { params: { flow_token: phone } } }
       };
     }
+    // Soumission des produits → afficher récap
     else {
       const produits = await getOdooProducts();
-      responseData = { screen: 'SCREEN_PRODUITS', data: { produits } };
+      const lignes = [];
+      for (let i = 1; i <= 3; i++) {
+        const id = payload[`produit_${i}_id`];
+        const qte = parseInt(payload[`produit_${i}_qte`]);
+        if (id && qte > 0) {
+          const prod = produits.find(p => p.id === id);
+          if (prod) lignes.push({ produit_id: id, nom: prod.title, qte, prix: prod.price });
+        }
+      }
+      if (lignes.length === 0) {
+        responseData = {
+          screen: 'SCREEN_PRODUITS',
+          data: { produits, error_message: 'Veuillez sélectionner au moins un produit.' }
+        };
+      } else {
+        const dateRaw = payload.date_livraison;
+        let dateLabel = dateRaw || 'non précisée';
+        if (dateRaw && dateRaw.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          const d = new Date(dateRaw + 'T12:00:00');
+          dateLabel = d.toLocaleDateString('fr-BE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+        }
+        pendingOrders[phone] = { lignes, dateLivraison: dateLabel, dateRaw, commentaire: payload.commentaire || '' };
+        const recapLines = lignes.map(l => `• ${l.nom} × ${l.qte} = ${(l.prix * l.qte).toFixed(2)} €`).join('\n');
+        const total = lignes.reduce((s, l) => s + l.prix * l.qte, 0);
+        const recap = `${recapLines}\n\nTotal estimé : ${total.toFixed(2)} €\nLivraison : ${dateLabel}${payload.commentaire ? '\nCommentaire : ' + payload.commentaire : ''}`;
+        responseData = { screen: 'SCREEN_CONFIRMATION', data: { recap } };
+      }
     }
+  }
+  else {
+    const produits = await getOdooProducts();
+    responseData = { screen: 'SCREEN_PRODUITS', data: { produits } };
+  }
 
     const encrypted = encrypt(responseData, aesKey, iv);
     res.setHeader('Content-Type', 'text/plain');
