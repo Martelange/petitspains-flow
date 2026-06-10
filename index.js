@@ -84,6 +84,9 @@ async function getOdooPrices() {
 async function findOrCreatePartner(phone, name) {
   try {
     const phoneClean = phone.replace('+', '').replace(/\s/g, '');
+    console.log('Searching partner with phone:', phoneClean);
+    const searchRes = await axios.post(...);
+    console.log('Partner search response:', searchRes.data.substring(0, 500));
 
     // 1. Chercher par téléphone mobile
     const searchRes = await axios.post(
@@ -140,7 +143,7 @@ async function createOdooSO(partnerId, lignes, dateLivraison, dateRaw, phone, co
       `<?xml version="1.0"?><methodCall><methodName>execute_kw</methodName><params><param><value>${ODOO_DB}</value></param><param><value><int>${ODOO_UID}</int></value></param><param><value>${ODOO_KEY}</value></param><param><value>sale.order</value></param><param><value>create</value></param><param><value><array><data><value><struct><member><name>partner_id</name><value><int>${partnerId}</int></value></member>${commitmentDateXml}<member><name>order_line</name><value><array><data>${orderLinesXml}</data></array></value></member><member><name>note</name><value><string>${note}</string></value></member><member><name>origin</name><value><string>WhatsApp Flow</string></value></member></struct></value></data></array></value></param><param><value><struct/></value></param></params></methodCall>`,
       { headers: { 'Content-Type': 'text/xml' } }
     );
-
+    console.log('SO creation response:', res.data.substring(0, 500));
     const idMatch = res.data.match(/<value><int>(\d+)<\/int><\/value>/);
     return idMatch ? idMatch[1] : null;
   } catch (e) {
